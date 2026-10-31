@@ -1,0 +1,341 @@
+<!DOCTYPE html>
+<html lang="he" dir="rtl">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>מחולל לוחות תקשורת וסדר יום</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    @media print {
+      body * {
+        visibility: hidden;
+      }
+      #print-area, #print-area * {
+        visibility: visible;
+      }
+      #print-area {
+        position: absolute;
+        left: 0;
+        top: 0;
+        width: 100%;
+        margin: 0;
+        padding: 0;
+      }
+      .no-print {
+        display: none !important;
+      }
+      @page {
+        size: A4 portrait;
+        margin: 10mm;
+      }
+      .card-item {
+        break-inside: avoid;
+        border: 2px dashed #9ca3af !important;
+      }
+    }
+  </style>
+</head>
+<body class="bg-slate-100 min-h-screen text-slate-800 font-sans p-4 sm:p-6">
+
+  <!-- סרגל עליון -->
+  <header class="no-print max-w-4xl mx-auto bg-white p-4 rounded-xl shadow-sm mb-6 flex flex-wrap gap-4 items-center justify-between">
+    <div>
+      <h1 class="text-xl font-bold text-indigo-700">מחולל תקשורת וסדר יום</h1>
+      <p id="voice-status" class="text-xs text-gray-500">טוען נתונים ומנוע קול...</p>
+    </div>
+    
+    <div class="flex flex-wrap items-center gap-2 sm:gap-3">
+      <button onclick="resetBoard()" class="px-3 py-2 rounded-lg text-xs font-semibold text-gray-600 hover:text-red-600 hover:bg-red-50 border border-gray-200 transition">
+        איפוס לוח
+      </button>
+      <button id="toggle-mode-btn" onclick="toggleMode()" class="px-4 py-2 rounded-lg text-sm font-semibold bg-emerald-600 text-white hover:bg-emerald-700 transition">
+        מצב תרגול (הקראה)
+      </button>
+      <button onclick="window.print()" class="px-4 py-2 rounded-lg text-sm font-semibold bg-indigo-600 text-white hover:bg-indigo-700 transition">
+        הדפס ל-A4
+      </button>
+    </div>
+  </header>
+
+  <!-- אזור חיפוש סמלים -->
+  <section id="search-section" class="no-print max-w-4xl mx-auto bg-white p-4 rounded-xl shadow-sm mb-6">
+    <div class="flex gap-2">
+      <input type="text" id="search-input" placeholder="הקלד מילה בעברית (למשל: מַיִם, אוֹכֶל, שֵׁרוּתִים, חָצֵר)..." 
+             class="flex-1 border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+             onkeydown="if(event.key==='Enter') searchSymbols()">
+      <button onclick="searchSymbols()" class="bg-gray-800 text-white px-5 py-2 rounded-lg text-sm font-medium hover:bg-black transition">
+        חפש
+      </button>
+    </div>
+    <div id="search-results" class="flex gap-3 overflow-x-auto mt-4 p-2 min-h-[90px] border border-dashed border-gray-200 rounded-lg items-center">
+      <span class="text-xs text-gray-400">חפש מילה כדי לבחור סמלים, או העלה תמונה אישית מהמכשיר ישירות למשבצת.</span>
+    </div>
+  </section>
+
+  <!-- דף ההדפסה / הגריד -->
+  <main class="max-w-4xl mx-auto">
+    <div id="print-area" class="bg-white p-6 rounded-xl shadow-sm border border-gray-200">
+      <div id="board-grid" class="grid grid-cols-2 sm:grid-cols-3 gap-4">
+        <!-- משבצות מרונדרות כאן -->
+      </div>
+    </div>
+  </main>
+
+  <script>
+    const STORAGE_KEY = 'aac_board_state_v2';
+    let isPlayMode = false;
+    let selectedVoice = null;
+
+    const defaultSlots = [
+      { label: "בֹּקֶר טוֹב", img: "" },
+      { label: "מִפְגָּשׁ", img: "" },
+      { label: "אֲרוּחַת עֶשֶׂר", img: "" },
+      { label: "חָצֵר", img: "" },
+      { label: "פְּעִילוּת", img: "" },
+      { label: "הוֹלְכִים הַבַּיְתָה", img: "" }
+    ];
+
+    let boardSlots = loadBoardState();
+
+    function loadBoardState() {
+      try {
+        const saved = localStorage.getItem(STORAGE_KEY);
+        if (saved) {
+          const parsed = JSON.parse(saved);
+          if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+        }
+      } catch (err) {
+        console.warn('שגיאה בטעינת לוח שמור:', err);
+      }
+      return JSON.parse(JSON.stringify(defaultSlots));
+    }
+
+    function saveBoardState() {
+      try {
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(boardSlots));
+      } catch (err) {
+        console.error('שגיאה בשמירת הלוח (אולי חריגת זיכרון):', err);
+      }
+    }
+
+    function initSpeechEngine() {
+      if (!('speechSynthesis' in window)) {
+        document.getElementById('voice-status').innerText = 'הדפדפן אינו תומך בהקראה קולית.';
+        return;
+      }
+
+      function pickBestHebrewVoice() {
+        const voices = window.speechSynthesis.getVoices();
+        const hebrewVoices = voices.filter(v => 
+          v.lang.toLowerCase().includes('he') || 
+          v.lang.toLowerCase().includes('iw') || 
+          v.lang.toLowerCase().includes('il')
+        );
+
+        if (hebrewVoices.length > 0) {
+          selectedVoice = hebrewVoices.find(v => 
+            v.name.includes('Natural') || 
+            v.name.includes('Online') || 
+            v.name.includes('Asaf') || 
+            v.name.includes('Hila')
+          ) || hebrewVoices[0];
+
+          document.getElementById('voice-status').innerText = `קול פעיל: ${selectedVoice.name} (שמירה אוטומטית פעילה)`;
+        } else {
+          document.getElementById('voice-status').innerText = 'קול עברי ברירת מחדל (שמירה אוטומטית פעילה)';
+        }
+      }
+
+      pickBestHebrewVoice();
+      window.speechSynthesis.onvoiceschanged = pickBestHebrewVoice;
+    }
+
+    function speakWord(text) {
+      if (!('speechSynthesis' in window) || !text) return;
+
+      window.speechSynthesis.cancel();
+      const utterance = new SpeechSynthesisUtterance(text);
+      utterance.lang = 'he-IL';
+      utterance.rate = 0.85;
+
+      if (selectedVoice) {
+        utterance.voice = selectedVoice;
+      }
+
+      window.speechSynthesis.speak(utterance);
+    }
+
+    function renderBoard() {
+      const grid = document.getElementById('board-grid');
+      grid.innerHTML = '';
+
+      boardSlots.forEach((slot, index) => {
+        const slotEl = document.createElement('div');
+        slotEl.className = `card-item border-2 rounded-xl p-3 flex flex-col items-center justify-between aspect-square transition select-none ${
+          isPlayMode 
+            ? 'cursor-pointer hover:bg-indigo-50 hover:border-indigo-400 border-indigo-200 active:scale-95' 
+            : 'border-gray-200 bg-white'
+        }`;
+
+        if (isPlayMode) {
+          slotEl.onclick = () => speakWord(slot.label);
+        }
+
+        const imgEl = slot.img 
+          ? `<img src="${slot.img}" alt="${slot.label}" class="w-24 h-24 object-contain pointer-events-none rounded-md">`
+          : `<div class="w-24 h-24 flex items-center justify-center text-gray-300 text-xs border border-dashed rounded-lg">אין סמל</div>`;
+
+        slotEl.innerHTML = `
+          ${imgEl}
+          <div class="w-full text-center mt-2">
+            ${isPlayMode 
+              ? `<span class="font-bold text-lg text-slate-800">${slot.label}</span>`
+              : `<input type="text" value="${slot.label}" onchange="updateLabel(${index}, this.value)" 
+                  class="w-full text-center font-bold text-sm border-b border-transparent hover:border-gray-300 focus:border-indigo-500 focus:outline-none bg-transparent">`
+            }
+          </div>
+          ${!isPlayMode ? `
+            <div class="no-print flex items-center gap-2 mt-2">
+              <label class="cursor-pointer text-[10px] bg-indigo-50 text-indigo-700 hover:bg-indigo-100 px-2 py-1 rounded">
+                העלאת תמונה
+                <input type="file" accept="image/*" class="hidden" onchange="handleImageUpload(${index}, event)">
+              </label>
+              <button onclick="clearSlot(${index})" class="text-[10px] text-red-400 hover:text-red-600">נקה</button>
+            </div>
+          ` : ''}
+        `;
+
+        grid.appendChild(slotEl);
+      });
+    }
+
+    // דחיסת תמונה והקטנה דרך Canvas לפני שמירה ל-LocalStorage
+    function handleImageUpload(index, event) {
+      const file = event.target.files[0];
+      if (!file) return;
+
+      const reader = new FileReader();
+      reader.onload = function(e) {
+        const img = new Image();
+        img.onload = function() {
+          const canvas = document.createElement('canvas');
+          const MAX_SIZE = 300;
+          let width = img.width;
+          let height = img.height;
+
+          if (width > height) {
+            if (width > MAX_SIZE) {
+              height = Math.round(height * (MAX_SIZE / width));
+              width = MAX_SIZE;
+            }
+          } else {
+            if (height > MAX_SIZE) {
+              width = Math.round(width * (MAX_SIZE / height));
+              height = MAX_SIZE;
+            }
+          }
+
+          canvas.width = width;
+          canvas.height = height;
+          const ctx = canvas.getContext('2d');
+          ctx.drawImage(img, 0, 0, width, height);
+
+          // דחיסה ל-JPEG ב-80% איכות (תופס שבריר מקום בזיכרון)
+          const compressedDataUrl = canvas.toDataURL('image/jpeg', 0.8);
+          boardSlots[index].img = compressedDataUrl;
+          saveBoardState();
+          renderBoard();
+        };
+        img.src = e.target.result;
+      };
+      reader.readAsDataURL(file);
+    }
+
+    async function searchSymbols() {
+      const inputEl = document.getElementById('search-input');
+      const rawQuery = inputEl.value.trim();
+      const resultsContainer = document.getElementById('search-results');
+      if (!rawQuery) return;
+
+      const cleanQuery = rawQuery.replace(/[\u0591-\u05C7]/g, '');
+      resultsContainer.innerHTML = '<span class="text-xs text-gray-500">מחפש סמלים...</span>';
+
+      try {
+        const res = await fetch(`https://api.arasaac.org/api/pictograms/he/search/${encodeURIComponent(cleanQuery)}`);
+        const data = await res.json();
+
+        resultsContainer.innerHTML = '';
+        if (!data || data.length === 0) {
+          resultsContainer.innerHTML = '<span class="text-xs text-red-500">לא נמצאו סמלים. נסה מילה בסיסית או העלה תמונה אישית מהמכשיר.</span>';
+          return;
+        }
+
+        data.slice(0, 8).forEach(item => {
+          const imgUrl = `https://static.arasaac.org/pictograms/${item._id}/${item._id}_300.png`;
+          const thumb = document.createElement('div');
+          thumb.className = 'flex flex-col items-center flex-shrink-0 cursor-pointer p-1 rounded-lg hover:bg-indigo-50 border border-transparent hover:border-indigo-300';
+          thumb.innerHTML = `
+            <img src="${imgUrl}" class="w-14 h-14 object-contain">
+            <span class="text-[10px] text-gray-600 mt-1">לחץ להוספה</span>
+          `;
+          thumb.onclick = () => addSymbolToFirstEmptySlot(imgUrl, rawQuery);
+          resultsContainer.appendChild(thumb);
+        });
+
+      } catch (err) {
+        resultsContainer.innerHTML = '<span class="text-xs text-red-500">שגיאה בתקשורת עם מאגר הסמלים.</span>';
+      }
+    }
+
+    function addSymbolToFirstEmptySlot(imgUrl, label) {
+      const emptyIndex = boardSlots.findIndex(s => !s.img);
+      const targetIndex = emptyIndex !== -1 ? emptyIndex : 0;
+      boardSlots[targetIndex].img = imgUrl;
+      if (!boardSlots[targetIndex].label || boardSlots[targetIndex].label === "ריק") {
+        boardSlots[targetIndex].label = label;
+      }
+      saveBoardState();
+      renderBoard();
+    }
+
+    function updateLabel(index, val) {
+      boardSlots[index].label = val;
+      saveBoardState();
+    }
+
+    function clearSlot(index) {
+      boardSlots[index] = { label: "ריק", img: "" };
+      saveBoardState();
+      renderBoard();
+    }
+
+    function resetBoard() {
+      if (confirm('לאפס את הלוח לברירת המחדל?')) {
+        boardSlots = JSON.parse(JSON.stringify(defaultSlots));
+        saveBoardState();
+        renderBoard();
+      }
+    }
+
+    function toggleMode() {
+      isPlayMode = !isPlayMode;
+      const btn = document.getElementById('toggle-mode-btn');
+      const searchSec = document.getElementById('search-section');
+
+      if (isPlayMode) {
+        btn.innerText = 'חזור למצב עריכה';
+        btn.className = 'px-4 py-2 rounded-lg text-sm font-semibold bg-amber-600 text-white hover:bg-amber-700 transition';
+        searchSec.classList.add('hidden');
+      } else {
+        btn.innerText = 'מצב תרגול (הקראה)';
+        btn.className = 'px-4 py-2 rounded-lg text-sm font-semibold bg-emerald-600 text-white hover:bg-emerald-700 transition';
+        searchSec.classList.remove('hidden');
+      }
+      renderBoard();
+    }
+
+    initSpeechEngine();
+    renderBoard();
+  </script>
+</body>
+</html>
